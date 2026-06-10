@@ -20,14 +20,19 @@ Two complementary tracks coexist:
   pre-boot agent that runs inside UEFI Boot Services, walks PCI,
   drives virtio-net, speaks DHCPv4 / DNS / TLS / HTTPS / OCI
   Distribution v2, verifies cosign signatures, then `LoadImage` +
-  `StartImage`s the distro kernel. Live end-to-end on **arm64 +
-  riscv64 + loong64** today ; amd64 firmware-bug chase ongoing.
+  `StartImage`s the distro kernel, lands in a stock Debian
+  userspace. **Live end-to-end Linux userspace on all four
+  arches** (amd64 + arm64 + riscv64 + loong64) as of 2026-06-10 ;
+  closed via the `R-amd64a..j` cleanup chain (EDK2 CpuPageTableLib
+  upstream fix, TamaGo cpuinit `.bss`/`goos.Bloc` writes, dialTLS
+  deadline-math, and the OVMF amd64 `LoadFile2` quirk worked around
+  via the `initrd=` kernel cmdline path).
 
 ## Repositories
 
 | Repo | Role |
 | --- | --- |
-| [`tamago-uefi`](https://github.com/cloud-boot/tamago-uefi) | Phase 2. Pure-Go TamaGo UEFI application — PCI walk, virtio-net, DHCPv4, DNS, TLS (CCADB roots), HTTPS, OCI v2, cosign, LoadImage chain-boot. Live kernel boot on 3 of 4 arches. |
+| [`tamago-uefi`](https://github.com/cloud-boot/tamago-uefi) | Phase 2. Pure-Go TamaGo UEFI application — PCI walk, virtio-net, DHCPv4, DNS, TLS (CCADB roots), HTTPS, OCI v2, cosign, LoadImage chain-boot. Live Linux userspace on **all four arches**. |
 | [`init`](https://github.com/cloud-boot/init) | Phase 1 Linux PID 1. Two sinks — `kexec` (Path A) and `reboot` after staging `Boot####` via efivarfs (Path C). Disk-mode openers cover ext4 / xfs / btrfs (single + RAID0/1/10/5/6) / ZFS / LUKS1+LUKS2 via the sibling `go-filesystems/*` and `go-fde/*` orgs. |
 | [`uki`](https://github.com/cloud-boot/uki) | Host-side toolchain. `cloud-boot build` / `push` / `label`. Cross-compiles init, assembles initramfs, wraps a UKI via `go-coff/pe`, stages a FAT ESP, emits a hybrid GPT + El Torito ISO. |
 | [`loader`](https://github.com/cloud-boot/loader) | Phase 1 Path B. TinyGo PE/COFF UEFI app — finds the kernel at runtime on an unmodified ext4 / xfs / btrfs / UFS2 cloud disk, `LoadImage` + `StartImage` straight from inside Boot Services. Six Linux families + FreeBSD + NetBSD verified. |
@@ -55,12 +60,26 @@ PCI walk -> virtio-net -> DHCPv4 -> DNS -> TLS (CCADB roots) -> HTTPS
 
 Live status per arch (2026-06-10) :
 
-| arch | M0..M7 (net + OCI) | M8.0 chain-boot | M8.3 live kernel boot | Notes |
-| --- | --- | --- | --- | --- |
-| **arm64**    | ✅ | ✅ | ✅ | `ghcr.io/siderolabs/kernel` |
-| **riscv64**  | ✅ | ✅ | ✅ | self-published via `cmd/cloudboot-oci-extract` from Debian linux-image, pushed to ttl.sh with nightly cron re-publish |
-| **loong64**  | ✅ | ✅ | ✅ | same self-publish path |
-| **amd64**    | ✅ | ⚠️ | 🚧 | EDK2 OVMF firmware bug (`R-amd64a..g`) — bypassed in `R-amd64f #2`, currently chasing a Go-runtime `cannot allocate memory` regression (`R-amd64g`) |
+| arch | M0..M7 (net + OCI) | M8.0 chain-boot | Live Linux userspace | Wall-clock | Kernel | Initrd handoff |
+| --- | --- | --- | --- | --- | --- | --- |
+| **arm64**    | ✅ | ✅ | ✅ | 17.1 s | Debian 6.12.90 | `LoadFile2` |
+| **amd64**    | ✅ | ✅ | ✅ | 16.1 s | Debian 6.12.90 | `initrd=` cmdline + `InheritParentDeviceHandle` |
+| **riscv64**  | ✅ | ✅ | ✅ | 18.1 s | Debian 6.12.90 | `LoadFile2` |
+| **loong64**  | ✅ | ✅ | ✅ | 17.1 s | Debian 7.0.12 | `LoadFile2` |
+
+All four legs reach a real Debian 13 userspace from a cold DHCP
+lease. The amd64 leg uses a different initrd-handoff mechanism than
+the other three — EDK2 OVMF amd64 silently mis-handles the
+`LoadFile2` protocol the kernel expects, so the loader falls back to
+the long-standing `initrd=` kernel-cmdline path published as a
+`SimpleFileSystem` ESP file ; the kernel reaches the same end state
+either way. Closure landed via the `R-amd64a..j` chain (EDK2
+`CpuPageTableLib` upstream fix, TamaGo cpuinit `.bss` zeroing +
+`goos.Bloc` MOVQ, `rxLoop` allocation churn fix, `dialTLSOnce`
+deadline-math fix, then `R-amd64j` espfile workaround).
+
+Sharp edges still tracked : `R-M9.1a` virtio-console firmware
+handoff, `R-M9.2a` `time.Sleep` under TamaGo+UEFI.
 
 ## Project standards
 
