@@ -1,0 +1,96 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label (e.g. "1.2.0" or "dev")'
+        required: true
+        default: 'dev'
+      aliases:
+        description: 'Space-separated aliases (e.g. "latest stable")'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+
+      - name: Install build dependencies
+        run: pip install -r docs/requirements.txt
+
+      - name: Configure git
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Compute version + aliases
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+            aliases="latest"
+            promote=true
+          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+            version="dev"
+            aliases=""
+            promote=false
+          else
+            version="${{ inputs.version }}"
+            aliases="${{ inputs.aliases }}"
+            if echo "$aliases" | grep -wq latest; then promote=true; else promote=false; fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "aliases=$aliases" >> "$GITHUB_OUTPUT"
+          echo "promote=$promote" >> "$GITHUB_OUTPUT"
+          echo "→ version=$version  aliases='$aliases'  promote=$promote"
+
+      - name: Deploy versioned docs with mike
+        working-directory: docs
+        run: |
+          mike deploy --push --update-aliases --deploy-prefix docs \
+            ${{ steps.ver.outputs.version }} ${{ steps.ver.outputs.aliases }}
+
+      - name: Promote 'latest' as the default docs version
+        if: steps.ver.outputs.promote == 'true'
+        working-directory: docs
+        run: mike set-default --push --deploy-prefix docs latest
+
+      - name: Sync landing page into gh-pages root
+        run: |
+          set -euo pipefail
+          git fetch origin gh-pages
+          rm -rf /tmp/gh-pages
+          git worktree add /tmp/gh-pages gh-pages
+          # Mirror pages/ into the gh-pages root, leaving the docs/ tree
+          # (managed by mike) untouched.
+          rsync -a --delete --exclude '/docs/' pages/. /tmp/gh-pages/
+          cd /tmp/gh-pages
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git add -A
+            git commit -m "landing: sync from ${GITHUB_SHA}"
+            git push origin gh-pages
+          else
+            echo "landing already in sync"
+          fi
