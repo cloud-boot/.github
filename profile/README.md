@@ -9,16 +9,16 @@ KVM/QEMU/OVMF, Apple `Virtualization.framework`, OpenStack, and bare
 metal. Pure Go from PID 1 down to the firmware-facing PE32+ entry
 point; no cgo, no kernel modules required.
 
-Two complementary tracks coexist:
+Three complementary tracks coexist:
 
 - **Phase 1 — UKI toolchain + Linux-side init.** Three boot paths
   (`init` + `kexec` ; UKI menu-then-reboot ; pure-UEFI TinyGo loader)
   that all land on the same end state — a stock distro userspace from
   an unmodified cloud disk. Covers six Linux families and three BSDs
   on four architectures.
-- **Phase 2 — pure-Go bare-metal UEFI loader on TamaGo.** A PXE-class
-  pre-boot agent that runs inside UEFI Boot Services, walks PCI,
-  drives virtio-net, speaks DHCPv4 / DNS / TLS / HTTPS / OCI
+- **Phase 2 — pure-Go bare-metal UEFI loader on TamaGo (Linux).** A
+  PXE-class pre-boot agent that runs inside UEFI Boot Services, walks
+  PCI, drives virtio-net, speaks DHCPv4 / DNS / TLS / HTTPS / OCI
   Distribution v2, verifies cosign signatures, then `LoadImage` +
   `StartImage`s the distro kernel, lands in a stock Debian
   userspace. **Live end-to-end Linux userspace on all four
@@ -26,7 +26,21 @@ Two complementary tracks coexist:
   closed via the `R-amd64a..j` cleanup chain (EDK2 CpuPageTableLib
   upstream fix, TamaGo cpuinit `.bss`/`goos.Bloc` writes, dialTLS
   deadline-math, and the OVMF amd64 `LoadFile2` quirk worked around
-  via the `initrd=` kernel cmdline path).
+  via the `initrd=` kernel cmdline path). Subsequently unified
+  across all four arches on the `initrd=` path (`M8.15`,
+  [`51f7005`](https://github.com/cloud-boot/tamago-uefi/commit/51f7005)),
+  and ~1684 LOC of `LoadFile2` publish code excised
+  (`M8.16`, [`2868756`](https://github.com/cloud-boot/tamago-uefi/commit/2868756)).
+- **Phase 3 — OS-agnostic OCI boot.** Same TamaGo loader, but instead
+  of `LoadImage`-ing a Linux kernel directly, it materialises an
+  in-memory UFS2 / FAT / NTFS image containing the target OS's own
+  `loader.efi` (or `boot.efi` / `bootmgfw.efi`), publishes it through
+  pure-Go `EFI_BLOCK_IO_PROTOCOL` + `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`
+  shims, and chain-boots the OS's native first-stage loader. **OpenBSD
+  reaches `boot>` live end-to-end** as of 2026-06-11. FreeBSD selects
+  our UFS as `currdev` but OOMs at kernel-load (sprint 2E pending).
+  NetBSD and Windows scaffolding shipped, gated on ISO size and a
+  real NTFS reader respectively.
 
 ## Repositories
 
@@ -53,7 +67,7 @@ and no external linker — PE32+ wrapping uses our own
 PCI walk -> virtio-net -> DHCPv4 -> DNS -> TLS (CCADB roots) -> HTTPS
   -> OCI Distribution v2 walk -> multi-arch index -> manifest
   -> streaming blob fetch -> SHA-256 verify -> cosign keyed verify
-  -> LoadImage -> SetLoadOptions(cmdline) -> PublishDTB -> PublishInitrd
+  -> LoadImage -> SetLoadOptions(cmdline) -> PublishSFS(initrd, ESP)
   -> PublishRNG -> StartImage -> Linux EFI-stub
   -> "Booting Linux Kernel..." -> real distro kernel
 ```
@@ -68,18 +82,79 @@ Live status per arch (2026-06-10) :
 | **loong64**  | ✅ | ✅ | ✅ | 17.1 s | Debian 7.0.12 | `LoadFile2` |
 
 All four legs reach a real Debian 13 userspace from a cold DHCP
-lease. The amd64 leg uses a different initrd-handoff mechanism than
-the other three — EDK2 OVMF amd64 silently mis-handles the
-`LoadFile2` protocol the kernel expects, so the loader falls back to
-the long-standing `initrd=` kernel-cmdline path published as a
-`SimpleFileSystem` ESP file ; the kernel reaches the same end state
-either way. Closure landed via the `R-amd64a..j` chain (EDK2
-`CpuPageTableLib` upstream fix, TamaGo cpuinit `.bss` zeroing +
-`goos.Bloc` MOVQ, `rxLoop` allocation churn fix, `dialTLSOnce`
-deadline-math fix, then `R-amd64j` espfile workaround).
+lease. After `R-amd64j` closure (the amd64-only `initrd=` cmdline
+workaround for the OVMF `LoadFile2` quirk), `M8.15`
+([`51f7005`](https://github.com/cloud-boot/tamago-uefi/commit/51f7005))
+unified all four arches on the `initrd=` path published as a
+`SimpleFileSystem` ESP file with `InheritParentDeviceHandle` ;
+`M8.16` ([`2868756`](https://github.com/cloud-boot/tamago-uefi/commit/2868756))
+then excised ~1684 LOC of dead `LoadFile2` publish code. The legacy
+`R-amd64a..j` saga remains in the git log : EDK2 `CpuPageTableLib`
+upstream fix, TamaGo cpuinit `.bss` zeroing + `goos.Bloc` MOVQ,
+`rxLoop` allocation churn fix, `dialTLSOnce` deadline-math fix.
 
-Sharp edges still tracked : `R-M9.1a` virtio-console firmware
-handoff, `R-M9.2a` `time.Sleep` under TamaGo+UEFI.
+`M9.0`/`M9.1`/`M9.2` ship an interactive boot menu — DHCP option 67
+points at an OCI artifact whose HCL describes the menu, the loader
+renders + handles input + dispatches the chosen entry. `R-M9.1a`
+virtio-console handoff and `R-M9.2a` `time.Sleep` under TamaGo+UEFI
+are documented as working-as-intended ; nothing else is on the
+critical path for Linux.
+
+## Phase 3 — OS-agnostic OCI boot (multi-OS, NEW)
+
+Same TamaGo loader, with two new Go-side firmware shims and a pure-Go
+FreeBSD-UFS2 read+write driver. Instead of `LoadImage`-ing a Linux
+kernel directly, we materialise an in-memory disk image containing
+the target OS's own first-stage loader and chain-boot it through
+`gBS->LoadImage` with our own published handle :
+
+```text
+... OCI fetch (Linux pipeline above) ...
+  -> in-memory UFS2 / FAT / NTFS image (go-filesystems/ufs Mkfs)
+  -> PublishBlockIO  (Go-side EFI_BLOCK_IO_PROTOCOL)
+  -> PublishSFS      (Go-side EFI_SIMPLE_FILE_SYSTEM_PROTOCOL)
+  -> LoadImage(devicepath = "ours\EFI\BOOT\BOOTX64.EFI")
+  -> StartImage -> OS's native loader.efi / boot.efi / bootmgfw.efi
+  -> kernel + userspace
+```
+
+Live status per (OS, arch) target as of 2026-06-11 :
+
+| OS | amd64 | arm64 | riscv64 | loong64 | Status | Reference commit |
+| --- | :---: | :---: | :---: | :---: | --- | --- |
+| **Linux** (Debian 13) | LIVE | LIVE | LIVE | LIVE | userspace, 16-18 s cold-DHCP | [`51f7005`](https://github.com/cloud-boot/tamago-uefi/commit/51f7005) |
+| **OpenBSD** | **LIVE** | — | — | — | `boot>` prompt end-to-end | [`d66d338`](https://github.com/cloud-boot/tamago-uefi/commit/d66d338) |
+| **FreeBSD** | partial | — | — | — | `loader.efi` selects our UFS as `currdev`, OOM at kernel-load (sprint 2E pending) | [`c37108f`](https://github.com/cloud-boot/tamago-uefi/commit/c37108f) |
+| **NetBSD** | scaffolded | — | — | — | probe + EFI + runner ready, gated on ISO download size (sprint 3.x) | [`d66d338`](https://github.com/cloud-boot/tamago-uefi/commit/d66d338) |
+| **Windows** | scaffolded | — | — | — | build pipeline + `BOOTX64-WINDOWSBOOT.EFI` ships, gated on a real NTFS reader (sprint 4.0a, multi-month) | [`44140a9`](https://github.com/cloud-boot/tamago-uefi/commit/44140a9) |
+
+Honest gaps :
+
+- **FreeBSD OOM** — `loader.efi` reaches `currdev` selection against
+  our published `SimpleFileSystem`, then runs out of usable memory
+  before transferring control to the kernel. Sprint 2E will hunt
+  the regression.
+- **NTFS reader** — Windows scaffolding currently relies on
+  pre-built artifacts ; the real path needs a pure-Go NTFS read
+  surface in `go-filesystems/ntfs` (multi-month effort).
+
+New infrastructure shipped along the way :
+
+- **`go-filesystems/ufs`** — read+write driver with `Mkfs` and full
+  double-indirect support ; cross-validated against three parallel
+  UFS2 sources (pure-Go `Mkfs`, real FreeBSD `raw.xz` extraction,
+  docker oracle).
+- **`EFI_BLOCK_IO_PROTOCOL`** Go-side publish surface
+  ([`ff2b56d`](https://github.com/cloud-boot/tamago-uefi/commit/ff2b56d) +
+  [`f5367a1`](https://github.com/cloud-boot/tamago-uefi/commit/f5367a1) +
+  [`d3eaa38`](https://github.com/cloud-boot/tamago-uefi/commit/d3eaa38)).
+- **`EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`** Go-side publish surface
+  ([`2831705`](https://github.com/cloud-boot/tamago-uefi/commit/2831705)).
+- **LEAQ-direct `.abi0` entry helper** — discovered in sprint 1.2
+  while chasing an ABIInternal-wrapper interpose corner case, then
+  ported across arm64/riscv64/loong64 RNG trampolines as defensive
+  infrastructure (sprint 1.3,
+  [`5874f50`](https://github.com/cloud-boot/tamago-uefi/commit/5874f50)).
 
 ## Project standards
 
