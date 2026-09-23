@@ -379,7 +379,7 @@ jobs:
             # Three attempts: one is a flake detector rather than a link
             # checker, and a lane that fails at random gets ignored.
             code=000
-            for attempt in 1 2 3; do
+            for _ in 1 2 3; do
               code=$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 "$u" 2>/dev/null) || true
               code=${code:-000}
               case "$code" in 2*|3*) break ;; esac
