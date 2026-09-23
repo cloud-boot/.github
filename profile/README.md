@@ -55,7 +55,9 @@ Three complementary tracks coexist:
 | [`kernel`](https://github.com/cloud-boot/kernel) | Reproducible Dockerfiles for the minimal bootstrap Linux kernels (`disk` / `cloud` variants per arch). |
 | [`iso`](https://github.com/cloud-boot/iso) | Pure-Go multi-arch hybrid iso9660 + GPT assembler + QEMU/EDK2 boot harness. One ISO embeds `BOOT{X64,AA64,RISCV64,LOONGARCH64}.EFI` ; each firmware reads only its own file. |
 | [`docs`](https://github.com/cloud-boot/docs) | mkdocs-material site at <https://cloud-boot.github.io/docs/>. |
-| [`virtio-net`](https://github.com/cloud-boot/virtio-net) · [`snp`](https://github.com/cloud-boot/snp) | Companion driver code consumed by the Phase 2 loader. |
+| [`windows-image`](https://github.com/cloud-boot/windows-image) | Two-path Windows test infrastructure: a redistributable PE32+ Boot Manager stub, and an operator-run pipeline for a real dev-VM image. Ships the recipe, never Microsoft bytes. |
+| [`tinygo-riscv64-uefi`](https://github.com/cloud-boot/tinygo-riscv64-uefi) · [`tinygo-loongarch64-uefi`](https://github.com/cloud-boot/tinygo-loongarch64-uefi) | The TinyGo runtime files that let `GOARCH=riscv64` and `loong64` compile a baremetal UEFI binary. Proposed upstream. |
+| [`virtio-net`](https://github.com/cloud-boot/virtio-net) · [`snp`](https://github.com/cloud-boot/snp) | **Empty placeholders.** Each holds one Renovate config and no code: the driver work they were named for lives inside [`tamago-uefi`](https://github.com/cloud-boot/tamago-uefi). Listed rather than quietly dropped, because the names are referenced elsewhere and a reader who follows one deserves to know what is there. |
 
 ## Phase 2 — what the pure-Go UEFI loader does today
 
@@ -180,10 +182,10 @@ New infrastructure shipped along the way :
   compressor for the `go-coff/efipack` PE32+ self-extractor.
 - [`go-coff`](https://github.com/go-coff) — PE32+ / EFI tooling :
   [`peln`](https://github.com/go-coff/peln) (parser + linker),
-  [`pectl`](https://github.com/go-coff/pectl) (CLI ; `pectl pack`),
+  [`pectl`](https://github.com/go-coff/pectl) (CLI ; `pectl pack`, and
+  Authenticode signing),
   [`efipack`](https://github.com/go-coff/efipack) (self-extracting
   PE32+ compressor — flate + LZFSE, host-side + per-arch stubs),
-  [`pec`](https://github.com/go-coff/pec) (Authenticode signing),
   [`stub`](https://github.com/go-coff/stub) (TinyGo UEFI stub).
 - [`go-filesystems`](https://github.com/go-filesystems) — pure-Go
   read-only drivers for ext4, xfs, btrfs (single + RAID0/1/10/5/6),
