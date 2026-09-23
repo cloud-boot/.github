@@ -348,3 +348,46 @@ jobs:
 # because there is no pin to bump. v46.2.4 and v46.2.5 both say '44': the
 # action bump these pull requests carry moves the runner's wrapper, not its
 # engine. Pinning that image by digest is a separate decision, not this file's.
+
+  # 5. PROVES: every https:// URL in the organisation profile resolves.
+  #    DOES NOT PROVE: that the page it reaches says what the text claims.
+  #
+  # ⛔ The jobs above check workflows and Renovate presets. Nothing checked the
+  # README, and the README is the whole point of this repository -- it is the
+  # organisation's front page. It carried a link to github.com/go-coff/pec, a
+  # repository that does not exist: Authenticode signing is in pectl, which the
+  # line above already names. A dead link on a front page breaks nothing that
+  # complains.
+  links:
+    name: every link in the profile resolves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check
+        run: |
+          set -uo pipefail
+          # The character class matters: markdown wraps a bare URL in angle
+          # brackets, and an extractor that stops only at ) and " carries the
+          # closing > into the request.
+          urls=$(grep -ohE 'https?://[^)">< [:space:]]+' profile/README.md | sed -E 's/[.,`]+$//' | sort -u)
+          test -n "$urls" || { echo "::error::no links found; is the README still there?"; exit 1; }
+          echo "checking $(printf '%s\n' "$urls" | wc -l) distinct URLs"
+          fail=0
+          while read -r u; do
+            # img.shields.io renders anything asked of it and proves nothing.
+            case "$u" in *img.shields.io*) continue ;; esac
+            # Three attempts: one is a flake detector rather than a link
+            # checker, and a lane that fails at random gets ignored.
+            code=000
+            for _ in 1 2 3; do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 "$u" 2>/dev/null) || true
+              code=${code:-000}
+              case "$code" in 2*|3*) break ;; esac
+              sleep 3
+            done
+            case "$code" in
+              2*|3*) printf '  ok   %s  %s\n' "$code" "$u" ;;
+              *)     printf '  FAIL %s  %s\n' "$code" "$u"; fail=1 ;;
+            esac
+          done <<< "$urls"
+          test "$fail" -eq 0 || { echo "::error::at least one link does not resolve"; exit 1; }
