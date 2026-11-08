@@ -363,31 +363,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # linkcheck (go-fleettools/fleettools, pinned) replaces a hand-written
+      # curl loop: retries with exponential backoff that honours Retry-After,
+      # github.com repo and path links decided through the REST API, a DEAD
+      # link told apart from a FLAKY host. It already skips img.shields.io, the
+      # RFC 2606 / 6761 placeholder hosts and URLs with no host (a bare scheme,
+      # prose glued to a backtick); nothing else was excluded before.
+      #
+      # THE ONE DELIBERATE EXCEPTION to "no secret on a command line or in the
+      # environment": the job's ephemeral, read-only github.token reaches the
+      # tool as a 0600 file in RUNNER_TEMP, written by the shell builtin printf
+      # (no process argument, no environment variable) and removed on exit. It
+      # is sent to api.github.com only and never printed.
       - name: Check
         run: |
-          set -uo pipefail
-          # The character class matters: markdown wraps a bare URL in angle
-          # brackets, and an extractor that stops only at ) and " carries the
-          # closing > into the request.
-          urls=$(grep -ohE 'https?://[^)">< [:space:]]+' profile/README.md | sed -E 's/[.,`]+$//' | sort -u)
-          test -n "$urls" || { echo "::error::no links found; is the README still there?"; exit 1; }
-          echo "checking $(printf '%s\n' "$urls" | wc -l) distinct URLs"
-          fail=0
-          while read -r u; do
-            # img.shields.io renders anything asked of it and proves nothing.
-            case "$u" in *img.shields.io*) continue ;; esac
-            # Three attempts: one is a flake detector rather than a link
-            # checker, and a lane that fails at random gets ignored.
-            code=000
-            for _ in 1 2 3; do
-              code=$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 "$u" 2>/dev/null) || true
-              code=${code:-000}
-              case "$code" in 2*|3*) break ;; esac
-              sleep 3
-            done
-            case "$code" in
-              2*|3*) printf '  ok   %s  %s\n' "$code" "$u" ;;
-              *)     printf '  FAIL %s  %s\n' "$code" "$u"; fail=1 ;;
-            esac
-          done <<< "$urls"
-          test "$fail" -eq 0 || { echo "::error::at least one link does not resolve"; exit 1; }
+          umask 077
+          token="${RUNNER_TEMP}/linkcheck-token"
+          trap 'rm -f "${token}"' EXIT
+          printf '%s' '${{ github.token }}' > "${token}"
+          go run github.com/go-fleettools/fleettools/cmd/linkcheck@v0.88.0 \
+            --token-file "${token}" \
+            profile/README.md
